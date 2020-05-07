@@ -1,0 +1,811 @@
+# README
+#
+# this template must be deployed in us-east-1 or it will fail because the ec2 ami 
+# is hard coded to us-east-1. the script will take ~15 minutes to deploy. it will 
+# spin up four vpc's (one to simulate on prem), one tgw, and a vpn connection 
+# between a ubuntu ec2 instance running strongswan (in the on prem VPC) and the 
+# tgw. the intention of this script was to show the functionality of aws network 
+# manager and add branch sites to the visualization of the geography and topology 
+# views.
+#
+# things to update
+# 1. create a key pair - add pub key to strong swan instance
+# 2. add private key to secrets manager
+# 3. clean up user data so more of the scripts are hosted on s3 and use sed to
+#    inject variables
+# 4. create the workshop/labs
+#
+
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+    Generator: "console-recorder"
+Description: "aws automated vpn"
+Resources:
+
+# VPC to simulate on premises for VPN and customer gateway
+    vpcop:
+        Type: "AWS::EC2::VPC"
+        Properties:
+            CidrBlock: "10.16.0.0/16"
+            InstanceTenancy: "default"
+            EnableDnsHostnames: true
+            EnableDnsSupport: true
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "vpc-onprem"
+
+    vpcopv6:
+        Type: AWS::EC2::VPCCidrBlock
+        Properties:
+           AmazonProvidedIpv6CidrBlock: true
+           VpcId: !Ref vpcop
+
+    igwop:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+          Tags:
+          - Key: "Name"
+            Value: "igw-onprem"
+    
+    attachop:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+          VpcId: !Ref vpcop
+          InternetGatewayId: !Ref igwop
+
+    routetableop:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref vpcop
+          Tags:
+          - Key: "Name"
+            Value: "onprem_rtb"
+
+    subop1:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpcop
+            CidrBlock: "10.16.1.0/24"
+            AvailabilityZone: "us-east-1a"
+
+    subop2:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpcop
+            CidrBlock: "10.16.16.0/24"
+            AvailabilityZone: "us-east-1a"
+            AssignIpv6AddressOnCreation: true
+            Ipv6CidrBlock: 
+              Fn::Sub:
+                - "${VpcPart}${SubnetPart}"
+                - SubnetPart: '16::/64'
+                  VpcPart: !Select [0, !Split ['00::/56', !Select [0,!GetAtt vpcop.Ipv6CidrBlocks]]]
+        DependsOn: vpcopv6
+
+
+    subnetroutetableop1:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref subop1
+          RouteTableId: !Ref routetableop
+
+    subnetroutetableop2:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref subop2
+          RouteTableId: !Ref routetableop
+
+    defaultrouteop:
+        Type: AWS::EC2::Route
+        Properties:
+           RouteTableId: !Ref routetableop
+           DestinationCidrBlock: 0.0.0.0/0
+           GatewayId: !Ref igwop
+
+    defaultrouteopv6:
+        Type: AWS::EC2::Route
+        Properties:
+           RouteTableId: !Ref routetableop
+           DestinationIpv6CidrBlock: ::/0
+           GatewayId: !Ref igwop
+
+# VPC A
+    vpca:
+        Type: "AWS::EC2::VPC"
+        Properties:
+            CidrBlock: "10.101.0.0/16"
+            InstanceTenancy: "default"
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "vpc-a"
+
+    igwa:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+          Tags:
+          - Key: "Name"
+            Value: "igw-a"
+    
+    attacha:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+          VpcId: !Ref vpca
+          InternetGatewayId: !Ref igwa
+
+    routetablea:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref vpca
+          Tags:
+          - Key: "Name"
+            Value: "a_rtb"
+
+    suba1:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpca
+            CidrBlock: "10.101.1.0/24"
+            AvailabilityZone: "us-east-1a"
+
+    suba2:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpca
+            CidrBlock: "10.101.2.0/24"
+            AvailabilityZone: "us-east-1b"
+
+    subnetroutetablea1:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref suba1
+          RouteTableId: !Ref routetablea
+
+    subnetroutetablea2:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref suba2
+          RouteTableId: !Ref routetablea
+
+    defaultroutea:
+        Type: AWS::EC2::Route
+        Properties:
+           RouteTableId: !Ref routetablea
+           DestinationCidrBlock: 0.0.0.0/0
+           GatewayId: !Ref igwa
+
+#    vpnroutea:
+#        Type: AWS::EC2::Route
+#        Properties:
+#           RouteTableId: !Ref routetablea
+#           DestinationCidrBlock: 10.16.16.0/0
+#           TransitGatewayId: !Ref tgw
+#        DependsOn: atta
+
+# VPC B
+    vpcb:
+        Type: "AWS::EC2::VPC"
+        Properties:
+            CidrBlock: "10.102.0.0/16"
+            InstanceTenancy: "default"
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "vpc-b"
+
+    igwb:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+          Tags:
+          - Key: "Name"
+            Value: "igw-b"
+    
+    attachb:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+          VpcId: !Ref vpcb
+          InternetGatewayId: !Ref igwb
+
+    routetableb:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref vpcb
+          Tags:
+          - Key: "Name"
+            Value: "b_rtb"
+
+    subb1:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpcb
+            CidrBlock: "10.102.1.0/24"
+            AvailabilityZone: "us-east-1a"
+
+    subb2:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpcb
+            CidrBlock: "10.102.2.0/24"
+            AvailabilityZone: "us-east-1b"
+
+    subnetroutetableb1:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref subb1
+          RouteTableId: !Ref routetableb
+
+    subnetroutetableb2:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref subb2
+          RouteTableId: !Ref routetableb
+
+    defaultrouteb:
+        Type: AWS::EC2::Route
+        Properties:
+           RouteTableId: !Ref routetableb
+           DestinationCidrBlock: 0.0.0.0/0
+           GatewayId: !Ref igwb
+
+#    vpnrouteb:
+#        Type: AWS::EC2::Route
+#        Properties:
+#           RouteTableId: !Ref routetableb
+#           DestinationCidrBlock: 10.16.16.0/0
+#           TransitGatewayId: !Ref tgw
+#        DependsOn: attb
+
+# VPC C
+    vpcc:
+        Type: "AWS::EC2::VPC"
+        Properties:
+            CidrBlock: "10.103.0.0/16"
+            InstanceTenancy: "default"
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "vpc-c"
+
+    igwc:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+          Tags:
+          - Key: "Name"
+            Value: "igw-c"
+    
+    attachc:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+          VpcId: !Ref vpcc
+          InternetGatewayId: !Ref igwc
+
+    routetablec:
+        Type: AWS::EC2::RouteTable
+        Properties:
+          VpcId: !Ref vpcc
+          Tags:
+          - Key: "Name"
+            Value: "c_rtb"
+
+    subc1:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpcc
+            CidrBlock: "10.103.1.0/24"
+            AvailabilityZone: "us-east-1a"
+
+    subc2:
+        Type: "AWS::EC2::Subnet"
+        Properties:
+            VpcId: !Ref vpcc
+            CidrBlock: "10.103.2.0/24"
+            AvailabilityZone: "us-east-1b"
+
+    subnetroutetablec1:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref subc1
+          RouteTableId: !Ref routetablec
+
+    subnetroutetablec2:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+          SubnetId: !Ref subc2
+          RouteTableId: !Ref routetablec
+
+    defaultroutec:
+        Type: AWS::EC2::Route
+        Properties:
+           RouteTableId: !Ref routetablec
+           DestinationCidrBlock: 0.0.0.0/0
+           GatewayId: !Ref igwc
+
+#    vpnroutec:
+#        Type: AWS::EC2::Route
+#        Properties:
+#           RouteTableId: !Ref routetablec
+#           DestinationCidrBlock: 10.16.16.0/0
+#           TransitGatewayId: !Ref tgw
+#        DependsOn: attc
+
+# Transit Gateway
+    tgw:
+        Type: "AWS::EC2::TransitGateway"
+        Properties:
+            AmazonSideAsn: 65100
+            AutoAcceptSharedAttachments: "disable"
+            DefaultRouteTableAssociation: "enable"
+            DefaultRouteTablePropagation: "enable"
+            DnsSupport: "enable"
+            VpnEcmpSupport: "enable"
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "tgw_east"
+
+    atta:
+        Type: "AWS::EC2::TransitGatewayAttachment"
+        Properties:
+            VpcId: !Ref vpca
+            TransitGatewayId: !Ref tgw
+            SubnetIds: 
+              - !Ref suba1
+              - !Ref suba2
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "att_a"
+
+    attb:
+        Type: "AWS::EC2::TransitGatewayAttachment"
+        Properties:
+            VpcId: !Ref vpcb
+            TransitGatewayId: !Ref tgw
+            SubnetIds: 
+              - !Ref subb1
+              - !Ref subb2
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "att_b"
+
+    attc:
+        Type: "AWS::EC2::TransitGatewayAttachment"
+        Properties:
+            VpcId: !Ref vpcc
+            TransitGatewayId: !Ref tgw
+            SubnetIds: 
+              - !Ref subc1
+              - !Ref subc2
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "att_c"
+
+
+# EC2 Instance
+    strongswansg:
+        Type: "AWS::EC2::SecurityGroup"
+        Properties:
+            GroupDescription: "strongswan_sg"
+            GroupName: "strongswan_sg"
+            VpcId: !Ref vpcop
+            SecurityGroupIngress:
+              - IpProtocol: tcp
+                FromPort: 22
+                ToPort: 22
+                CidrIp: 0.0.0.0/0
+              - IpProtocol: icmp
+                FromPort: -1
+                ToPort: -1
+                CidrIp: 0.0.0.0/0
+              - IpProtocol: udp
+                FromPort: 500
+                ToPort: 500
+                CidrIp: 0.0.0.0/0
+              - IpProtocol: udp
+                FromPort: 4500
+                ToPort: 4500
+                CidrIp: 0.0.0.0/0
+
+    eni1:
+        Type: AWS::EC2::NetworkInterface
+        Properties:
+           Tags:
+           - Key: "Name"
+             Value: "strongswan_eth0"
+           Description: A nice description.
+           SourceDestCheck: false
+           GroupSet:
+           - !Ref strongswansg
+           SubnetId: !Ref subop1
+           PrivateIpAddress: 10.16.1.254
+
+    easteip:
+        Type: AWS::EC2::EIP
+        Properties: 
+          Tags: 
+            - 
+              Key: "Name"
+              Value: "strongswan"
+
+    eipassoc:
+        Type: AWS::EC2::EIPAssociation
+        Properties: 
+          AllocationId: !GetAtt easteip.AllocationId
+          NetworkInterfaceId: !Ref eni1
+
+    eni2:
+        Type: AWS::EC2::NetworkInterface
+        Properties:
+           Tags:
+           - Key: "Name"
+             Value: "strongswan_eth1"
+           Description: A nice description.
+           SourceDestCheck: false
+           GroupSet:
+           - !Ref strongswansg
+           SubnetId: !Ref subop2
+           PrivateIpAddress: 10.16.16.254
+
+      
+
+    strongswan:
+        Type: "AWS::EC2::Instance"
+        Properties:
+            ImageId: "ami-04763b3055de4860b"
+            KeyName: "macos"
+            InstanceType: "t2.medium"
+            Tenancy: "default"
+            Monitoring: false
+            DisableApiTermination: false
+            InstanceInitiatedShutdownBehavior: "stop"
+            CreditSpecification: 
+                CPUCredits: "standard"
+            EbsOptimized: false
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "strongswan_east"
+            BlockDeviceMappings: 
+              - 
+                DeviceName: "/dev/xvda"
+                Ebs: 
+                    VolumeSize: 8
+                    DeleteOnTermination: true
+                    VolumeType: "gp2"
+            NetworkInterfaces: 
+              - NetworkInterfaceId: !Ref eni1
+                DeviceIndex: "0"
+              - NetworkInterfaceId: !Ref eni2
+                DeviceIndex: "1"
+            UserData:
+              Fn::Base64: 
+                Fn::Sub:
+                  - |
+                    #!/bin/bash -xe
+                    
+                    ETH1="/etc/network/interfaces.d/99-eth1.cfg"
+                    cat <<EOF >> $ETH1
+                    #
+                    # /etc/network/interfaces.d/99-eth1.cfg
+                    #
+                    
+                    auto eth1
+                    iface eth1 inet dhcp
+                    
+                    # control-alias eth0
+                    iface eth1 inet6 dhcp
+                    EOF
+
+                    wget -O /etc/dhcp/dhclient-enter-hooks.d/restrict-default-gw https://s3.amazonaws.com/neeco.io/scripts/restrict-default-gw
+                    systemctl restart networking
+                    ifconfig eth1
+
+                    apt-get update
+                    apt-get install -y strongswan
+
+
+                    IPSECCONF="/etc/ipsec.conf"
+                    cat <<EOF >> $IPSECCONF
+                    #
+                    # /etc/ipsec.conf
+                    #
+                    conn %default
+                            # Authentication Method : Pre-Shared Key
+                            leftauth=psk
+                            rightauth=psk
+                            # Encryption Algorithm : aes-128-cbc
+                            # Authentication Algorithm : sha1
+                            # Perfect Forward Secrecy : Diffie-Hellman Group 2
+                            ike=aes128-sha1-modp1024!
+                            # Lifetime : 28800 seconds
+                            ikelifetime=28800s
+                            # Phase 1 Negotiation Mode : main
+                            aggressive=no
+                            # Protocol : esp
+                            # Encryption Algorithm : aes-128-cbc
+                            # Authentication Algorithm : hmac-sha1-96
+                            # Perfect Forward Secrecy : Diffie-Hellman Group 2
+                            esp=aes128-sha1-modp1024!
+                            # Lifetime : 3600 seconds
+                            lifetime=3600s
+                            # Mode : tunnel
+                            type=tunnel
+                            # DPD Interval : 10
+                            dpddelay=10s
+                            # DPD Retries : 3
+                            dpdtimeout=30s
+                            # Tuning Parameters for AWS Virtual Private Gateway:
+                            keyexchange=ikev1
+                            rekey=yes
+                            reauth=no
+                            dpdaction=restart
+                            closeaction=restart
+                            leftsubnet=0.0.0.0/0,::/0
+                            rightsubnet=0.0.0.0/0,::/0
+                            leftupdown=/etc/ipsec-vti.sh
+                            installpolicy=yes
+                            compress=no
+                            mobike=no
+                    conn AWS-VPC-GW1
+                            # Customer Gateway: :
+                            left=10.16.1.254
+                            leftid=${strongip}
+                            # Virtual Private Gateway :
+                            right=${ipaddress1}
+                            rightid=${ipaddress1}
+                            auto=start
+                            mark=100
+                            #reqid=1
+                    conn AWS-VPC-GW2
+                            # Customer Gateway: :
+                            left=10.16.1.254
+                            leftid=${strongip}
+                            # Virtual Private Gateway :
+                            right=${ipaddress2}
+                            rightid=${ipaddress2}
+                            auto=start
+                            mark=200
+                    EOF
+
+                    IPSECSECRETS="/etc/ipsec.secrets"
+                    cat <<EOF >> $IPSECSECRETS
+                    #
+                    # /etc/ipsec.secrets
+                    #
+                    
+                    # This file holds shared secrets or RSA private keys for authentication.
+                    
+                    # RSA private key for this host, authenticating it to any other host
+                    # which knows the public part.
+                    ${strongip} ${ipaddress1} : PSK "supersecretpassword321"
+                    ${strongip} ${ipaddress2} : PSK "supersecretpassword321"
+                    EOF
+
+                    # download vti script, update IP addresses from VPNOutsideIP custom cfn lambda
+                    wget -O /etc/ipsec-vti.sh https://s3.amazonaws.com/neeco.io/scripts/ipsec-vti.sh
+                    sed -i 's/CgwInsideIp1/VTI_LOCALADDR=${CgwInsideIpAddress1}\/30/' /etc/ipsec-vti.sh
+                    sed -i 's/CgwInsideIp2/VTI_LOCALADDR=${CgwInsideIpAddress2}\/30/' /etc/ipsec-vti.sh
+                    sed -i 's/TgwInsideIp1/VTI_REMOTEADDR=${TgwInsideIpAddress1}\/30/' /etc/ipsec-vti.sh
+                    sed -i 's/TgwInsideIp2/VTI_REMOTEADDR=${TgwInsideIpAddress2}\/30/' /etc/ipsec-vti.sh
+                    chmod +x /etc/ipsec-vti.sh
+
+                    echo "SET grub-pc/install_devices /dev/sda" | debconf-communicate
+                    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+                    export DEBIAN_FRONTEND=noninteractive
+
+                    wget https://s3.amazonaws.com/neeco.io/scripts/frr_install.sh
+                    chmod +x frr_install.sh
+                    ./frr_install.sh
+
+                    sed -i "s/bgpd=.*/bgpd=yes/g" /etc/frr/daemons
+                    systemctl restart frr
+                    # systemctl restart networking
+
+                    FRRCONF="/etc/frr/frr.conf"
+                    cat <<EOF >> $FRRCONF
+                    frr version 7.3-dev-MyOwnFRRVersion
+                    frr defaults traditional
+                    hostname ip-10-16-1-254
+                    log syslog informational
+                    no ipv6 forwarding
+                    configure terminal
+                    !
+                    router bgp 65016
+                     neighbor 169.254.169.1 remote-as 65100
+                     neighbor 169.254.169.5 remote-as 65100
+                     !
+                     address-family ipv4 unicast
+                      network 10.16.16.0/24
+                     exit-address-family
+                    !
+                    line vty
+                    !
+                    EOF
+
+                    systemctl restart frr
+                    ipsec restart
+
+                    echo "this is from userdata" > /home/ubuntu/userdatatest.txt
+                    echo "vpn public IP 1: ${ipaddress1}" >> /home/ubuntu/userdatatest.txt
+                    echo "vpn public IP 2: ${ipaddress2}" >> /home/ubuntu/userdatatest.txt
+                    echo "transit gateway id: ${thegateway}" >> /home/ubuntu/userdatatest.txt
+                    echo "strongswan public IP: ${strongip}" >> /home/ubuntu/userdatatest.txt
+                    echo "cgw inside IP1: ${CgwInsideIpAddress1}" >> /home/ubuntu/userdatatest.txt
+                    echo "cgw inside IP2: ${CgwInsideIpAddress2}" >> /home/ubuntu/userdatatest.txt
+                    echo "tgw inside IP1: ${TgwInsideIpAddress1}" >> /home/ubuntu/userdatatest.txt
+                    echo "tgw inside IP2: ${TgwInsideIpAddress2}" >> /home/ubuntu/userdatatest.txt
+
+                  - ipaddress1: !GetAtt VPNOutsideIP.OutsideIpAddress1
+                    ipaddress2: !GetAtt VPNOutsideIP.OutsideIpAddress2
+                    CgwInsideIpAddress1: !GetAtt VPNOutsideIP.CgwInsideIpAddress1
+                    CgwInsideIpAddress2: !GetAtt VPNOutsideIP.CgwInsideIpAddress2
+                    TgwInsideIpAddress1: !GetAtt VPNOutsideIP.TgwInsideIpAddress1
+                    TgwInsideIpAddress2: !GetAtt VPNOutsideIP.TgwInsideIpAddress2
+                    thegateway: !Ref tgw
+                    strongip: !Ref easteip
+
+                 
+
+
+    eastcgw:
+        Type: "AWS::EC2::CustomerGateway"
+        Properties:
+            BgpAsn: 65016
+            IpAddress: !Ref easteip
+            Type: "ipsec.1"
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "east_cgw"
+
+    eastvpn:
+        Type: "AWS::EC2::VPNConnection"
+        Properties:
+            CustomerGatewayId: !Ref eastcgw
+            Type: "ipsec.1"
+            StaticRoutesOnly: false
+            TransitGatewayId: !Ref tgw
+            VpnTunnelOptionsSpecifications:
+              -
+                PreSharedKey: 'supersecretpassword321'
+                TunnelInsideCidr: 169.254.169.0/30
+              -
+                PreSharedKey: 'supersecretpassword321'
+                TunnelInsideCidr: 169.254.169.4/30
+            Tags: 
+              - 
+                Key: "Name"
+                Value: "strongswan_east"
+    
+
+
+
+
+
+
+
+# Grabbing public IP addresses for VPN connections
+    VPNOutsideIP:
+        Type: Custom::VPNOutsideIPGenerator
+        Properties:
+          ServiceToken: !GetAtt VPNOutsideIPGenerator.Arn
+          VPNID: !Ref eastvpn 
+    VPNOutsideIPGenerator:
+      Type: AWS::Lambda::Function
+      Properties:
+        FunctionName: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:get-outside-ip'
+        Handler: "index.lambda_handler"
+        Timeout: 15
+        Role: !GetAtt 'LambdaRole.Arn'
+        Runtime: python3.6
+        Environment:
+          Variables:
+            VpnId: !Ref eastvpn
+        Code:
+          ZipFile: |
+            import os
+            import boto3
+            import cfnresponse
+            import xml.etree.ElementTree as ET
+            
+            
+            def lambda_handler(event, context):
+            
+                ec2 = boto3.client('ec2')
+                
+                response = ec2.describe_vpn_connections()
+                
+                responseData = {}
+                InsideList = []
+                
+                # First find the correct vpn tunnel and then
+                # Walk the XML to find the private IP addresses for both tunnels
+                for vpn in response['VpnConnections']:
+                    if vpn['VpnConnectionId']==os.environ['VpnId']:
+                        xmlstring = vpn['CustomerGatewayConfiguration']
+                        root = ET.fromstring(xmlstring)
+                        for tunnel in root.findall('ipsec_tunnel/customer_gateway/tunnel_inside_address'):
+                            InsideList.append(tunnel.find('ip_address').text)
+                
+                responseData['CgwInsideIpAddress1'] = InsideList[0]
+                responseData['CgwInsideIpAddress2'] = InsideList[1]
+                
+                # take the last octect of the ip address and subtract it by 1 to get the VGW inside IP address
+                responseData['TgwInsideIpAddress1'] = InsideList[0][:-1]+str(int(InsideList[0][-1])-1)
+                responseData['TgwInsideIpAddress2'] = InsideList[1][:-1]+str(int(InsideList[1][-1])-1)
+                
+                responseData['OutsideIpAddress1'] = response['VpnConnections'][0]['VgwTelemetry'][0]['OutsideIpAddress']
+                responseData['OutsideIpAddress2'] = response['VpnConnections'][0]['VgwTelemetry'][1]['OutsideIpAddress']
+                
+                print(responseData)
+            
+                # return a dict to cloudformation
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
+    LambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: /
+        Policies:
+          - PolicyName: lambda-vpc
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource:
+                    - "*"
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeVpnConnections
+                  Resource:
+                    - "*"
+
+
+
+
+
+
+
+Outputs:
+
+  easteip:
+    Description: strongwan IP
+    Value: !Ref easteip
+
+  VPNOutsideIP1: 
+    Description: First VPN Outside IP Address
+    Value: !GetAtt VPNOutsideIP.OutsideIpAddress1
+
+  VPNOutsideIP2: 
+    Description: Second VPN Outside IP Address
+    Value: !GetAtt VPNOutsideIP.OutsideIpAddress2
+
+  eastvpn:
+    Description: vpn
+    Value: !Ref eastvpn
+    Export:
+       Name: !Sub "${AWS::StackName}-vpn"
+
+  tgw:
+    Description: tgw
+    Value: !Ref tgw
+    Export:
+      Name: !Sub "${AWS::StackName}-tgw"
+
